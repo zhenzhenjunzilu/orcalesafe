@@ -27,18 +27,25 @@ if [ "$EUID" -ne 0 ]; then
   error "请用 root 执行：sudo bash $0  或  su - root 后再执行"
 fi
 
-# ── 检测普通用户（ubuntu 或第一个非 root 用户）──
+# ── 检测普通用户（必须用 id 确认用户真实存在）──
 NORMAL_USER=""
 if id "ubuntu" &>/dev/null; then
   NORMAL_USER="ubuntu"
 else
-  # 找 /home 下第一个有目录的普通用户
-  NORMAL_USER=$(ls /home 2>/dev/null | head -1)
+  # 遍历 /home 下目录，找第一个真实存在的用户
+  for dir in /home/*/; do
+    u=$(basename "$dir")
+    if id "$u" &>/dev/null; then
+      NORMAL_USER="$u"
+      break
+    fi
+  done
 fi
+
 if [ -n "$NORMAL_USER" ]; then
   info "检测到普通用户：$NORMAL_USER"
 else
-  warn "未检测到普通用户，密钥仅部署到 root"
+  info "未检测到普通用户，密钥仅部署到 root"
 fi
 
 # ── 解析参数 ────────────────────────────────
@@ -86,12 +93,23 @@ KEY_INPUT=${KEY_INPUT:-1}
 echo ""
 
 if [ "$KEY_INPUT" = "2" ]; then
+  info "清理旧密钥..."
+  # 清理 root 旧密钥
+  rm -f /root/.ssh/authorized_keys
+  rm -f /root/oracle_key_*.pem
+  # 清理普通用户旧密钥
+  if [ -n "$NORMAL_USER" ]; then
+    NORMAL_HOME=$(eval echo "~$NORMAL_USER")
+    rm -f "$NORMAL_HOME/.ssh/authorized_keys"
+    rm -f "$NORMAL_HOME/oracle_key_*.pem"
+  fi
+  success "旧密钥已清理"
+
   info "开始生成新的 SSH 密钥对..."
   KEY_NAME="oracle_key_$(date +%Y%m%d%H%M%S)"
   TMP_DIR="/tmp/$KEY_NAME"
   mkdir -p "$TMP_DIR"
 
-  # 生成密钥
   ssh-keygen -t rsa -b 4096 -f "$TMP_DIR/$KEY_NAME" -N "" -C "$KEY_NAME" &>/dev/null
   success "密钥生成完毕：$KEY_NAME"
 
@@ -143,10 +161,7 @@ if [ "$KEY_INPUT" = "2" ]; then
   echo -e "${CYAN}============================================${NC}"
   echo ""
 
-  # 清理临时目录
   rm -rf "$TMP_DIR"
-
-  # 标记已处理 root 密钥，后续跳过
   ROOT_CHOICE="skip"
 fi
 
@@ -267,7 +282,7 @@ else
   error "配置有误！请检查后手动修复，备份文件在 *.bak"
 fi
 
-# ── 11. 防火墙同时放行新旧端口（保险）────────
+# ── 11. 防火墙同时放行新旧端口 ───────────────
 echo ""
 info "防火墙放行新端口 $TARGET_PORT 和旧端口 $OLD_PORT（保险）..."
 if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
@@ -320,7 +335,7 @@ echo "      Oracle 控制台安全列表删除端口 $OLD_PORT 的入站规则"
 echo "      然后执行以下命令关闭系统防火墙旧端口："
 echo ""
 if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
-echo "      sudo ufw delete allow $OLD_PORT/tcp"
+echo "      ufw delete allow $OLD_PORT/tcp"
 else
 echo "      iptables -D INPUT -p tcp --dport $OLD_PORT -j ACCEPT && netfilter-persistent save"
 fi
