@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
 #  Oracle Cloud Ubuntu - SSH 安全配置脚本
-#  功能：改端口 / 禁密码登录 / 允许root密钥登录
+#  功能：改端口 / 禁密码登录 / 允许root密钥登录 / 重新生成密钥
 #  用法：
 #    交互模式：sudo bash orcalesafe.sh
 #    参数模式：sudo bash orcalesafe.sh -p 1022 -r yes
@@ -14,6 +14,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
 info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -62,7 +63,71 @@ echo "   Oracle Cloud SSH 安全配置脚本"
 echo "============================================"
 echo ""
 
-# ── 1. 确定 SSH 端口 ────────────────────────
+# ── 1. 是否重新生成密钥对 ────────────────────
+echo "是否需要重新生成 SSH 密钥对？"
+echo "  1) 否（已有密钥，跳过）"
+echo "  2) 是（私钥丢失或需要更换）"
+read -p "请选择 [1/2]（默认 1）: " KEY_INPUT </dev/tty
+KEY_INPUT=${KEY_INPUT:-1}
+echo ""
+
+if [ "$KEY_INPUT" = "2" ]; then
+  info "开始生成新的 SSH 密钥对..."
+  KEY_NAME="oracle_key_$(date +%Y%m%d%H%M%S)"
+  TMP_DIR="/tmp/$KEY_NAME"
+  mkdir -p "$TMP_DIR"
+
+  # 生成密钥
+  ssh-keygen -t rsa -b 4096 -f "$TMP_DIR/$KEY_NAME" -N "" -C "$KEY_NAME" &>/dev/null
+  success "密钥生成完毕：$KEY_NAME"
+
+  # 部署公钥到 ubuntu 和 root
+  UBUNTU_SSH_DIR="/home/ubuntu/.ssh"
+  mkdir -p "$UBUNTU_SSH_DIR"
+  cp "$TMP_DIR/${KEY_NAME}.pub" "$UBUNTU_SSH_DIR/authorized_keys"
+  chmod 700 "$UBUNTU_SSH_DIR"
+  chmod 600 "$UBUNTU_SSH_DIR/authorized_keys"
+  chown -R ubuntu:ubuntu "$UBUNTU_SSH_DIR"
+  success "公钥已部署到 ubuntu"
+
+  mkdir -p /root/.ssh
+  cp "$TMP_DIR/${KEY_NAME}.pub" /root/.ssh/authorized_keys
+  chmod 700 /root/.ssh
+  chmod 600 /root/.ssh/authorized_keys
+  success "公钥已部署到 root"
+
+  # 复制私钥到两个用户目录
+  cp "$TMP_DIR/$KEY_NAME" "/root/${KEY_NAME}.pem"
+  chmod 600 "/root/${KEY_NAME}.pem"
+  cp "$TMP_DIR/$KEY_NAME" "/home/ubuntu/${KEY_NAME}.pem"
+  chmod 600 "/home/ubuntu/${KEY_NAME}.pem"
+  chown ubuntu:ubuntu "/home/ubuntu/${KEY_NAME}.pem"
+  success "私钥已保存到 /root/${KEY_NAME}.pem 和 /home/ubuntu/${KEY_NAME}.pem"
+
+  # 打印私钥内容
+  echo ""
+  echo -e "${CYAN}============================================${NC}"
+  echo -e "${CYAN}  ⬇️  请立即复制并保存以下私钥内容！${NC}"
+  echo -e "${CYAN}============================================${NC}"
+  cat "$TMP_DIR/$KEY_NAME"
+  echo -e "${CYAN}============================================${NC}"
+  echo -e "${YELLOW}私钥文件位置（可用 scp 下载）：${NC}"
+  echo "  /root/${KEY_NAME}.pem"
+  echo "  /home/ubuntu/${KEY_NAME}.pem"
+  echo ""
+  echo -e "${YELLOW}下载命令（在本地终端执行）：${NC}"
+  echo "  scp -P 22 root@你的IP:/root/${KEY_NAME}.pem ./"
+  echo -e "${CYAN}============================================${NC}"
+  echo ""
+
+  # 清理临时目录
+  rm -rf "$TMP_DIR"
+
+  # 标记已处理 root 密钥，后续跳过
+  ROOT_CHOICE="skip"
+fi
+
+# ── 2. 确定 SSH 端口 ────────────────────────
 if [ -z "$TARGET_PORT" ]; then
   read -p "请输入新的 SSH 端口（直接回车默认 1022）: " INPUT_PORT </dev/tty
   TARGET_PORT=${INPUT_PORT:-1022}
@@ -76,8 +141,10 @@ fi
 info "SSH 端口将设置为：$TARGET_PORT"
 echo ""
 
-# ── 2. 确定是否允许 root 密钥登录 ───────────
-if [ -z "$ROOT_CHOICE" ]; then
+# ── 3. 确定是否允许 root 密钥登录 ───────────
+if [ "$ROOT_CHOICE" = "skip" ]; then
+  info "密钥已在上一步部署到 root，跳过此步"
+elif [ -z "$ROOT_CHOICE" ]; then
   echo "是否将 ubuntu 的公钥复制给 root（允许 root 密钥登录）？"
   echo "  1) 是（推荐，和 ubuntu 用同一把密钥）"
   echo "  2) 否（保持 root 只能通过 ubuntu 跳转）"
@@ -89,12 +156,12 @@ else
 fi
 echo ""
 
-# ── 3. 检测当前 SSH 端口 ─────────────────────
+# ── 4. 检测当前 SSH 端口 ─────────────────────
 OLD_PORT=$(sshd -T 2>/dev/null | grep "^port " | awk '{print $2}' | head -1)
 OLD_PORT=${OLD_PORT:-22}
 info "当前 SSH 端口：$OLD_PORT"
 
-# ── 4. 备份 ─────────────────────────────────
+# ── 5. 备份 ─────────────────────────────────
 info "备份原始配置文件..."
 cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
 success "已备份 → /etc/ssh/sshd_config.bak"
@@ -102,7 +169,7 @@ success "已备份 → /etc/ssh/sshd_config.bak"
 DROPIN_DIR="/etc/ssh/sshd_config.d"
 TARGET_CONF=""
 
-# ── 5. 检测 drop-in 配置文件 ────────────────
+# ── 6. 检测 drop-in 配置文件 ────────────────
 info "检测 drop-in 配置目录..."
 if [ -d "$DROPIN_DIR" ] && ls "$DROPIN_DIR"/*.conf &>/dev/null; then
   HIGHEST_CONF=$(ls "$DROPIN_DIR"/*.conf 2>/dev/null | sort -V | tail -1)
@@ -131,7 +198,7 @@ else
   TARGET_CONF="/etc/ssh/sshd_config"
 fi
 
-# ── 6. 写入新配置 ────────────────────────────
+# ── 7. 写入新配置 ────────────────────────────
 info "写入新配置到 $TARGET_CONF ..."
 cat > "$TARGET_CONF" << CONF
 Port $TARGET_PORT
@@ -142,7 +209,7 @@ UsePAM yes
 CONF
 success "配置已写入"
 
-# ── 7. 注释主配置文件中所有 Port 行 ──────────
+# ── 8. 注释主配置文件中所有 Port 行 ──────────
 info "检查主配置文件中的 Port 配置..."
 if grep -qE "^Port " /etc/ssh/sshd_config; then
   sed -i 's/^Port /#Port /' /etc/ssh/sshd_config
@@ -151,7 +218,7 @@ else
   info "主配置文件中无 Port 行，跳过"
 fi
 
-# ── 8. root 密钥配置 ─────────────────────────
+# ── 9. root 密钥配置 ─────────────────────────
 if [ "$ROOT_CHOICE" = "yes" ]; then
   info "配置 root 密钥登录..."
   UBUNTU_KEYS="/home/ubuntu/.ssh/authorized_keys"
@@ -163,11 +230,11 @@ if [ "$ROOT_CHOICE" = "yes" ]; then
   chmod 700 /root/.ssh
   chmod 600 /root/.ssh/authorized_keys
   success "已将 ubuntu 公钥复制到 root"
-else
+elif [ "$ROOT_CHOICE" = "no" ]; then
   info "跳过 root 密钥配置"
 fi
 
-# ── 9. 语法检查 ──────────────────────────────
+# ── 10. 语法检查 ─────────────────────────────
 echo ""
 info "检查 SSH 配置语法..."
 if sshd -t; then
@@ -176,16 +243,14 @@ else
   error "配置有误！请检查后手动修复，备份文件在 *.bak"
 fi
 
-# ── 10. 防火墙同时放行新旧端口（保险）────────
+# ── 11. 防火墙同时放行新旧端口（保险）────────
 echo ""
 info "防火墙放行新端口 $TARGET_PORT 和旧端口 $OLD_PORT（保险）..."
 if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
   ufw allow "$TARGET_PORT/tcp"
   success "UFW 已放行新端口 $TARGET_PORT"
 elif command -v iptables &>/dev/null; then
-  # 放行新端口
   iptables -I INPUT -p tcp --dport "$TARGET_PORT" -j ACCEPT
-  # 确保旧端口也在（防止重启 sshd 后断连）
   iptables -I INPUT -p tcp --dport "$OLD_PORT" -j ACCEPT
   if command -v netfilter-persistent &>/dev/null; then
     netfilter-persistent save
@@ -197,13 +262,13 @@ else
   warn "未检测到防火墙工具，请手动放行端口 $TARGET_PORT"
 fi
 
-# ── 11. 重启 sshd ────────────────────────────
+# ── 12. 重启 sshd ────────────────────────────
 echo ""
 info "重启 sshd 服务..."
 systemctl restart sshd
 success "sshd 已重启，新端口 $TARGET_PORT 已生效"
 
-# ── 12. 输出最终生效配置 ─────────────────────
+# ── 13. 输出最终生效配置 ─────────────────────
 echo ""
 info "最终生效配置："
 sshd -T | grep -E "^port|passwordauth|pubkeyauth|permitroot"
@@ -220,7 +285,7 @@ echo "      网络 → VCN → 子网 → 安全列表"
 echo "      添加入站规则：TCP 端口 $TARGET_PORT"
 echo ""
 echo "   【第二步】新开终端测试新端口（不要关闭当前会话！）"
-if [ "$ROOT_CHOICE" = "yes" ]; then
+if [ "$ROOT_CHOICE" = "yes" ] || [ "$ROOT_CHOICE" = "skip" ]; then
 echo "      ssh -i 你的私钥 -p $TARGET_PORT root@你的IP"
 fi
 echo "      ssh -i 你的私钥 -p $TARGET_PORT ubuntu@你的IP"
