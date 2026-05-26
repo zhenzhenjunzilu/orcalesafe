@@ -147,16 +147,11 @@ if [ "$KEY_INPUT" = "2" ]; then
   echo -e "${CYAN}  ⬇️  请立即复制并保存以下私钥内容！${NC}"
   echo -e "${CYAN}============================================${NC}"
   cat "$TMP_DIR/$KEY_NAME"
-  echo -e "${CYAN}============================================${NC}"
-  echo -e "${YELLOW}私钥文件位置（HTTP下载）：${NC}"
-  echo "  cd /tmp && python3 -m http.server 8080"
-  echo "  浏览器访问：http://$(hostname -I | awk '{print $1}'):8080/${KEY_NAME}.pem"
+  echo -e "${YELLOW}👆 复制以上内容，保存为 .txt 文件后重命名为 .pem 即可使用${NC}"
+  echo -e "${YELLOW}服务器上的私钥位置：/root/${KEY_NAME}.pem${NC}"
   echo -e "${CYAN}============================================${NC}"
   echo ""
 
-  # 复制私钥到 /tmp 方便下载
-  cp "$TMP_DIR/$KEY_NAME" "/tmp/${KEY_NAME}.pem"
-  chmod 644 "/tmp/${KEY_NAME}.pem"
 
   rm -rf "$TMP_DIR"
   ROOT_CHOICE="skip"
