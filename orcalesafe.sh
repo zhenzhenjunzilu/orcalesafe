@@ -2,6 +2,10 @@
 # ============================================
 #  Oracle Cloud Ubuntu - SSH 安全配置脚本
 #  功能：改端口 / 禁密码登录 / 允许root密钥登录
+#  用法：
+#    交互模式：sudo bash orcalesafe.sh
+#    参数模式：sudo bash orcalesafe.sh -p 1022 -r yes
+#    一键模式：curl -fsSL https://raw.githubusercontent.com/zhenzhenjunzilu/orcalesafe/main/orcalesafe.sh | sudo bash -s -- -p 1022 -r yes
 # ============================================
 
 set -e
@@ -22,15 +26,49 @@ if [ "$EUID" -ne 0 ]; then
   error "请用 root 执行：sudo bash $0"
 fi
 
+# ── 解析参数 ────────────────────────────────
+TARGET_PORT=""
+ROOT_CHOICE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -p|--port)
+      TARGET_PORT="$2"
+      shift 2
+      ;;
+    -r|--root)
+      ROOT_CHOICE="$2"
+      shift 2
+      ;;
+    -h|--help)
+      echo "用法: sudo bash orcalesafe.sh [-p 端口] [-r yes/no]"
+      echo "  -p, --port   SSH 端口（默认 1022）"
+      echo "  -r, --root   是否允许 root 密钥登录 yes/no（默认 yes）"
+      echo ""
+      echo "示例："
+      echo "  sudo bash orcalesafe.sh -p 1022 -r yes"
+      echo "  curl -fsSL https://raw.githubusercontent.com/zhenzhenjunzilu/orcalesafe/main/orcalesafe.sh | sudo bash -s -- -p 1022 -r yes"
+      exit 0
+      ;;
+    *)
+      error "未知参数：$1，使用 -h 查看帮助"
+      ;;
+  esac
+done
+
 echo ""
 echo "============================================"
 echo "   Oracle Cloud SSH 安全配置脚本"
 echo "============================================"
 echo ""
 
-# ── 1. 选择 SSH 端口 ────────────────────────
-read -p "请输入新的 SSH 端口（直接回车默认 1022）: " INPUT_PORT
-TARGET_PORT=${INPUT_PORT:-1022}
+# ── 1. 确定 SSH 端口 ────────────────────────
+if [ -z "$TARGET_PORT" ]; then
+  read -p "请输入新的 SSH 端口（直接回车默认 1022）: " INPUT_PORT </dev/tty
+  TARGET_PORT=${INPUT_PORT:-1022}
+else
+  info "使用参数端口：$TARGET_PORT"
+fi
 
 if ! [[ "$TARGET_PORT" =~ ^[0-9]+$ ]] || [ "$TARGET_PORT" -lt 1 ] || [ "$TARGET_PORT" -gt 65535 ]; then
   error "端口号无效：$TARGET_PORT"
@@ -38,12 +76,17 @@ fi
 info "SSH 端口将设置为：$TARGET_PORT"
 echo ""
 
-# ── 2. 是否允许 root 密钥登录 ───────────────
-echo "是否将 ubuntu 的公钥复制给 root（允许 root 密钥登录）？"
-echo "  1) 是（推荐，和 ubuntu 用同一把密钥）"
-echo "  2) 否（保持 root 只能通过 ubuntu 跳转）"
-read -p "请选择 [1/2]（默认 1）: " ROOT_CHOICE
-ROOT_CHOICE=${ROOT_CHOICE:-1}
+# ── 2. 确定是否允许 root 密钥登录 ───────────
+if [ -z "$ROOT_CHOICE" ]; then
+  echo "是否将 ubuntu 的公钥复制给 root（允许 root 密钥登录）？"
+  echo "  1) 是（推荐，和 ubuntu 用同一把密钥）"
+  echo "  2) 否（保持 root 只能通过 ubuntu 跳转）"
+  read -p "请选择 [1/2]（默认 1）: " ROOT_INPUT </dev/tty
+  ROOT_INPUT=${ROOT_INPUT:-1}
+  [ "$ROOT_INPUT" = "2" ] && ROOT_CHOICE="no" || ROOT_CHOICE="yes"
+else
+  info "root 密钥登录：$ROOT_CHOICE"
+fi
 echo ""
 
 # ── 3. 备份 ─────────────────────────────────
@@ -56,11 +99,10 @@ TARGET_CONF=""
 
 # ── 4. 检测 drop-in 配置文件 ────────────────
 info "检测 drop-in 配置目录..."
-if [ -d "$DROPIN_DIR" ] && [ "$(ls -A $DROPIN_DIR/*.conf 2>/dev/null)" ]; then
-  # 找数字最大的 conf（优先级最高）
-  HIGHEST_CONF=$(ls $DROPIN_DIR/*.conf 2>/dev/null | sort -V | tail -1)
-  ALL_CONFS=$(ls $DROPIN_DIR/*.conf 2>/dev/null)
-  CONF_COUNT=$(ls $DROPIN_DIR/*.conf 2>/dev/null | wc -l)
+if [ -d "$DROPIN_DIR" ] && ls "$DROPIN_DIR"/*.conf &>/dev/null; then
+  HIGHEST_CONF=$(ls "$DROPIN_DIR"/*.conf 2>/dev/null | sort -V | tail -1)
+  ALL_CONFS=$(ls "$DROPIN_DIR"/*.conf 2>/dev/null)
+  CONF_COUNT=$(ls "$DROPIN_DIR"/*.conf 2>/dev/null | wc -l)
 
   info "发现 $CONF_COUNT 个 drop-in 文件："
   for f in $ALL_CONFS; do echo "    $f"; done
@@ -86,7 +128,7 @@ fi
 
 # ── 5. 写入新配置 ────────────────────────────
 info "写入新配置到 $TARGET_CONF ..."
-tee "$TARGET_CONF" > /dev/null << CONF
+cat > "$TARGET_CONF" << CONF
 Port $TARGET_PORT
 PermitRootLogin prohibit-password
 PasswordAuthentication no
@@ -105,7 +147,7 @@ else
 fi
 
 # ── 7. root 密钥配置 ─────────────────────────
-if [ "$ROOT_CHOICE" = "1" ]; then
+if [ "$ROOT_CHOICE" = "yes" ]; then
   info "配置 root 密钥登录..."
   UBUNTU_KEYS="/home/ubuntu/.ssh/authorized_keys"
 
@@ -166,7 +208,7 @@ echo "      网络 → VCN → 子网 → 安全列表"
 echo "      添加入站规则：TCP 端口 $TARGET_PORT"
 echo ""
 echo "   2. 新开终端测试连接（不要关闭当前会话！）："
-if [ "$ROOT_CHOICE" = "1" ]; then
+if [ "$ROOT_CHOICE" = "yes" ]; then
 echo "      ssh -i 你的私钥 -p $TARGET_PORT root@你的IP"
 fi
 echo "      ssh -i 你的私钥 -p $TARGET_PORT ubuntu@你的IP"
