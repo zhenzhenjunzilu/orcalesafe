@@ -1,11 +1,11 @@
 #!/bin/bash
 # ============================================
-#  Oracle Cloud Ubuntu - SSH 安全配置脚本
+#  Oracle Cloud / Debian - SSH 安全配置脚本
 #  功能：改端口 / 禁密码登录 / 允许root密钥登录 / 重新生成密钥
 #  用法：
-#    交互模式：sudo bash orcalesafe.sh
-#    参数模式：sudo bash orcalesafe.sh -p 1022 -r yes
-#    一键模式：curl -fsSL https://raw.githubusercontent.com/zhenzhenjunzilu/orcalesafe/main/orcalesafe.sh | sudo bash -s -- -p 1022 -r yes
+#    交互模式：bash orcalesafe.sh
+#    参数模式：bash orcalesafe.sh -p 1022 -r yes
+#    一键模式：curl -fsSL https://raw.githubusercontent.com/zhenzhenjunzilu/orcalesafe/main/orcalesafe.sh | bash -s -- -p 1022 -r yes
 # ============================================
 
 set -e
@@ -24,7 +24,21 @@ error()   { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 # ── 必须 root 执行 ──────────────────────────
 if [ "$EUID" -ne 0 ]; then
-  error "请用 root 执行：sudo bash $0"
+  error "请用 root 执行：sudo bash $0  或  su - root 后再执行"
+fi
+
+# ── 检测普通用户（ubuntu 或第一个非 root 用户）──
+NORMAL_USER=""
+if id "ubuntu" &>/dev/null; then
+  NORMAL_USER="ubuntu"
+else
+  # 找 /home 下第一个有目录的普通用户
+  NORMAL_USER=$(ls /home 2>/dev/null | head -1)
+fi
+if [ -n "$NORMAL_USER" ]; then
+  info "检测到普通用户：$NORMAL_USER"
+else
+  warn "未检测到普通用户，密钥仅部署到 root"
 fi
 
 # ── 解析参数 ────────────────────────────────
@@ -42,13 +56,13 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h|--help)
-      echo "用法: sudo bash orcalesafe.sh [-p 端口] [-r yes/no]"
+      echo "用法: bash orcalesafe.sh [-p 端口] [-r yes/no]"
       echo "  -p, --port   SSH 端口（默认 1022）"
       echo "  -r, --root   是否允许 root 密钥登录 yes/no（默认 yes）"
       echo ""
       echo "示例："
-      echo "  sudo bash orcalesafe.sh -p 1022 -r yes"
-      echo "  curl -fsSL https://raw.githubusercontent.com/zhenzhenjunzilu/orcalesafe/main/orcalesafe.sh | sudo bash -s -- -p 1022 -r yes"
+      echo "  bash orcalesafe.sh -p 1022 -r yes"
+      echo "  curl -fsSL https://raw.githubusercontent.com/zhenzhenjunzilu/orcalesafe/main/orcalesafe.sh | bash -s -- -p 1022 -r yes"
       exit 0
       ;;
     *)
@@ -81,28 +95,37 @@ if [ "$KEY_INPUT" = "2" ]; then
   ssh-keygen -t rsa -b 4096 -f "$TMP_DIR/$KEY_NAME" -N "" -C "$KEY_NAME" &>/dev/null
   success "密钥生成完毕：$KEY_NAME"
 
-  # 部署公钥到 ubuntu 和 root
-  UBUNTU_SSH_DIR="/home/ubuntu/.ssh"
-  mkdir -p "$UBUNTU_SSH_DIR"
-  cp "$TMP_DIR/${KEY_NAME}.pub" "$UBUNTU_SSH_DIR/authorized_keys"
-  chmod 700 "$UBUNTU_SSH_DIR"
-  chmod 600 "$UBUNTU_SSH_DIR/authorized_keys"
-  chown -R ubuntu:ubuntu "$UBUNTU_SSH_DIR"
-  success "公钥已部署到 ubuntu"
-
+  # 部署公钥到 root
   mkdir -p /root/.ssh
   cp "$TMP_DIR/${KEY_NAME}.pub" /root/.ssh/authorized_keys
   chmod 700 /root/.ssh
   chmod 600 /root/.ssh/authorized_keys
   success "公钥已部署到 root"
 
-  # 复制私钥到两个用户目录
+  # 部署公钥到普通用户（如果存在）
+  if [ -n "$NORMAL_USER" ]; then
+    NORMAL_HOME=$(eval echo "~$NORMAL_USER")
+    mkdir -p "$NORMAL_HOME/.ssh"
+    cp "$TMP_DIR/${KEY_NAME}.pub" "$NORMAL_HOME/.ssh/authorized_keys"
+    chmod 700 "$NORMAL_HOME/.ssh"
+    chmod 600 "$NORMAL_HOME/.ssh/authorized_keys"
+    chown -R "$NORMAL_USER:$NORMAL_USER" "$NORMAL_HOME/.ssh"
+    success "公钥已部署到 $NORMAL_USER"
+  fi
+
+  # 保存私钥到 root 目录
   cp "$TMP_DIR/$KEY_NAME" "/root/${KEY_NAME}.pem"
   chmod 600 "/root/${KEY_NAME}.pem"
-  cp "$TMP_DIR/$KEY_NAME" "/home/ubuntu/${KEY_NAME}.pem"
-  chmod 600 "/home/ubuntu/${KEY_NAME}.pem"
-  chown ubuntu:ubuntu "/home/ubuntu/${KEY_NAME}.pem"
-  success "私钥已保存到 /root/${KEY_NAME}.pem 和 /home/ubuntu/${KEY_NAME}.pem"
+  success "私钥已保存到 /root/${KEY_NAME}.pem"
+
+  # 保存私钥到普通用户目录（如果存在）
+  if [ -n "$NORMAL_USER" ]; then
+    NORMAL_HOME=$(eval echo "~$NORMAL_USER")
+    cp "$TMP_DIR/$KEY_NAME" "$NORMAL_HOME/${KEY_NAME}.pem"
+    chmod 600 "$NORMAL_HOME/${KEY_NAME}.pem"
+    chown "$NORMAL_USER:$NORMAL_USER" "$NORMAL_HOME/${KEY_NAME}.pem"
+    success "私钥已保存到 $NORMAL_HOME/${KEY_NAME}.pem"
+  fi
 
   # 打印私钥内容
   echo ""
@@ -113,7 +136,7 @@ if [ "$KEY_INPUT" = "2" ]; then
   echo -e "${CYAN}============================================${NC}"
   echo -e "${YELLOW}私钥文件位置（可用 scp 下载）：${NC}"
   echo "  /root/${KEY_NAME}.pem"
-  echo "  /home/ubuntu/${KEY_NAME}.pem"
+  [ -n "$NORMAL_USER" ] && echo "  $(eval echo ~$NORMAL_USER)/${KEY_NAME}.pem"
   echo ""
   echo -e "${YELLOW}下载命令（在本地终端执行）：${NC}"
   echo "  scp -P 22 root@你的IP:/root/${KEY_NAME}.pem ./"
@@ -145,9 +168,9 @@ echo ""
 if [ "$ROOT_CHOICE" = "skip" ]; then
   info "密钥已在上一步部署到 root，跳过此步"
 elif [ -z "$ROOT_CHOICE" ]; then
-  echo "是否将 ubuntu 的公钥复制给 root（允许 root 密钥登录）？"
-  echo "  1) 是（推荐，和 ubuntu 用同一把密钥）"
-  echo "  2) 否（保持 root 只能通过 ubuntu 跳转）"
+  echo "是否将 ${NORMAL_USER:-普通用户} 的公钥复制给 root（允许 root 密钥登录）？"
+  echo "  1) 是（推荐，和 ${NORMAL_USER:-普通用户} 用同一把密钥）"
+  echo "  2) 否"
   read -p "请选择 [1/2]（默认 1）: " ROOT_INPUT </dev/tty
   ROOT_INPUT=${ROOT_INPUT:-1}
   [ "$ROOT_INPUT" = "2" ] && ROOT_CHOICE="no" || ROOT_CHOICE="yes"
@@ -219,17 +242,18 @@ else
 fi
 
 # ── 9. root 密钥配置 ─────────────────────────
-if [ "$ROOT_CHOICE" = "yes" ]; then
+if [ "$ROOT_CHOICE" = "yes" ] && [ -n "$NORMAL_USER" ]; then
   info "配置 root 密钥登录..."
-  UBUNTU_KEYS="/home/ubuntu/.ssh/authorized_keys"
-  if [ ! -f "$UBUNTU_KEYS" ]; then
-    error "找不到 ubuntu 的公钥文件：$UBUNTU_KEYS"
+  NORMAL_HOME=$(eval echo "~$NORMAL_USER")
+  NORMAL_KEYS="$NORMAL_HOME/.ssh/authorized_keys"
+  if [ ! -f "$NORMAL_KEYS" ]; then
+    error "找不到 ${NORMAL_USER} 的公钥文件：$NORMAL_KEYS"
   fi
   mkdir -p /root/.ssh
-  cp "$UBUNTU_KEYS" /root/.ssh/authorized_keys
+  cp "$NORMAL_KEYS" /root/.ssh/authorized_keys
   chmod 700 /root/.ssh
   chmod 600 /root/.ssh/authorized_keys
-  success "已将 ubuntu 公钥复制到 root"
+  success "已将 ${NORMAL_USER} 公钥复制到 root"
 elif [ "$ROOT_CHOICE" = "no" ]; then
   info "跳过 root 密钥配置"
 fi
@@ -257,6 +281,7 @@ elif command -v iptables &>/dev/null; then
     success "iptables 已放行并持久化端口 $OLD_PORT 和 $TARGET_PORT"
   else
     warn "iptables 已放行，但 netfilter-persistent 未安装，重启后可能失效"
+    warn "建议执行：apt install -y iptables-persistent"
   fi
 else
   warn "未检测到防火墙工具，请手动放行端口 $TARGET_PORT"
@@ -288,7 +313,7 @@ echo "   【第二步】新开终端测试新端口（不要关闭当前会话�
 if [ "$ROOT_CHOICE" = "yes" ] || [ "$ROOT_CHOICE" = "skip" ]; then
 echo "      ssh -i 你的私钥 -p $TARGET_PORT root@你的IP"
 fi
-echo "      ssh -i 你的私钥 -p $TARGET_PORT ubuntu@你的IP"
+[ -n "$NORMAL_USER" ] && echo "      ssh -i 你的私钥 -p $TARGET_PORT ${NORMAL_USER}@你的IP"
 echo ""
 echo "   【第三步】确认新端口登录成功后，关闭旧端口 $OLD_PORT"
 echo "      Oracle 控制台安全列表删除端口 $OLD_PORT 的入站规则"
@@ -297,7 +322,7 @@ echo ""
 if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
 echo "      sudo ufw delete allow $OLD_PORT/tcp"
 else
-echo "      sudo iptables -D INPUT -p tcp --dport $OLD_PORT -j ACCEPT && sudo netfilter-persistent save"
+echo "      iptables -D INPUT -p tcp --dport $OLD_PORT -j ACCEPT && netfilter-persistent save"
 fi
 echo ""
 echo "   ⚡ 旧端口 $OLD_PORT 暂时保留，新端口 $TARGET_PORT 已生效"
