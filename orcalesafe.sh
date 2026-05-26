@@ -32,7 +32,6 @@ NORMAL_USER=""
 if id "ubuntu" &>/dev/null; then
   NORMAL_USER="ubuntu"
 else
-  # 遍历 /home 下目录，找第一个真实存在的用户
   for dir in /home/*/; do
     u=$(basename "$dir")
     if id "$u" &>/dev/null; then
@@ -94,10 +93,8 @@ echo ""
 
 if [ "$KEY_INPUT" = "2" ]; then
   info "清理旧密钥..."
-  # 清理 root 旧密钥
   rm -f /root/.ssh/authorized_keys
   rm -f /root/oracle_key_*.pem
-  # 清理普通用户旧密钥
   if [ -n "$NORMAL_USER" ]; then
     NORMAL_HOME=$(eval echo "~$NORMAL_USER")
     rm -f "$NORMAL_HOME/.ssh/authorized_keys"
@@ -131,12 +128,11 @@ if [ "$KEY_INPUT" = "2" ]; then
     success "公钥已部署到 $NORMAL_USER"
   fi
 
-  # 保存私钥到 root 目录
+  # 保存私钥
   cp "$TMP_DIR/$KEY_NAME" "/root/${KEY_NAME}.pem"
   chmod 600 "/root/${KEY_NAME}.pem"
   success "私钥已保存到 /root/${KEY_NAME}.pem"
 
-  # 保存私钥到普通用户目录（如果存在）
   if [ -n "$NORMAL_USER" ]; then
     NORMAL_HOME=$(eval echo "~$NORMAL_USER")
     cp "$TMP_DIR/$KEY_NAME" "$NORMAL_HOME/${KEY_NAME}.pem"
@@ -145,21 +141,22 @@ if [ "$KEY_INPUT" = "2" ]; then
     success "私钥已保存到 $NORMAL_HOME/${KEY_NAME}.pem"
   fi
 
-  # 打印私钥内容
+  # 打印私钥
   echo ""
   echo -e "${CYAN}============================================${NC}"
   echo -e "${CYAN}  ⬇️  请立即复制并保存以下私钥内容！${NC}"
   echo -e "${CYAN}============================================${NC}"
   cat "$TMP_DIR/$KEY_NAME"
   echo -e "${CYAN}============================================${NC}"
-  echo -e "${YELLOW}私钥文件位置（可用 scp 下载）：${NC}"
-  echo "  /root/${KEY_NAME}.pem"
-  [ -n "$NORMAL_USER" ] && echo "  $(eval echo ~$NORMAL_USER)/${KEY_NAME}.pem"
-  echo ""
-  echo -e "${YELLOW}下载命令（在本地终端执行）：${NC}"
-  echo "  scp -P 22 root@你的IP:/root/${KEY_NAME}.pem ./"
+  echo -e "${YELLOW}私钥文件位置（HTTP下载）：${NC}"
+  echo "  cd /tmp && python3 -m http.server 8080"
+  echo "  浏览器访问：http://$(hostname -I | awk '{print $1}'):8080/${KEY_NAME}.pem"
   echo -e "${CYAN}============================================${NC}"
   echo ""
+
+  # 复制私钥到 /tmp 方便下载
+  cp "$TMP_DIR/$KEY_NAME" "/tmp/${KEY_NAME}.pem"
+  chmod 644 "/tmp/${KEY_NAME}.pem"
 
   rm -rf "$TMP_DIR"
   ROOT_CHOICE="skip"
@@ -204,12 +201,11 @@ info "备份原始配置文件..."
 cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
 success "已备份 → /etc/ssh/sshd_config.bak"
 
+# ── 6. 写入 SSH 配置 ─────────────────────────
 DROPIN_DIR="/etc/ssh/sshd_config.d"
-TARGET_CONF=""
 
-# ── 6. 检测 drop-in 配置文件 ────────────────
-info "检测 drop-in 配置目录..."
 if [ -d "$DROPIN_DIR" ] && ls "$DROPIN_DIR"/*.conf &>/dev/null; then
+  # ── 有 drop-in 目录：清理旧文件，写入最高优先级文件 ──
   HIGHEST_CONF=$(ls "$DROPIN_DIR"/*.conf 2>/dev/null | sort -V | tail -1)
   ALL_CONFS=$(ls "$DROPIN_DIR"/*.conf 2>/dev/null)
   CONF_COUNT=$(ls "$DROPIN_DIR"/*.conf 2>/dev/null | wc -l)
@@ -218,7 +214,7 @@ if [ -d "$DROPIN_DIR" ] && ls "$DROPIN_DIR"/*.conf &>/dev/null; then
   for f in $ALL_CONFS; do echo "    $f"; done
 
   if [ "$CONF_COUNT" -gt 1 ]; then
-    warn "存在多个配置文件，将删除低优先级文件，只保留 $HIGHEST_CONF"
+    warn "删除低优先级文件，只保留 $HIGHEST_CONF"
     for f in $ALL_CONFS; do
       if [ "$f" != "$HIGHEST_CONF" ]; then
         cp "$f" "${f}.bak"
@@ -228,35 +224,49 @@ if [ -d "$DROPIN_DIR" ] && ls "$DROPIN_DIR"/*.conf &>/dev/null; then
     done
   fi
 
-  TARGET_CONF="$HIGHEST_CONF"
-  cp "$TARGET_CONF" "${TARGET_CONF}.bak"
-  success "使用 drop-in 文件：$TARGET_CONF"
-else
-  info "未发现 drop-in 配置，将直接修改主配置文件"
-  TARGET_CONF="/etc/ssh/sshd_config"
-fi
-
-# ── 7. 写入新配置 ────────────────────────────
-info "写入新配置到 $TARGET_CONF ..."
-cat > "$TARGET_CONF" << CONF
+  cp "$HIGHEST_CONF" "${HIGHEST_CONF}.bak"
+  cat > "$HIGHEST_CONF" << CONF
 Port $TARGET_PORT
 PermitRootLogin prohibit-password
 PasswordAuthentication no
 PubkeyAuthentication yes
 UsePAM yes
 CONF
-success "配置已写入"
+  success "配置已写入 drop-in 文件：$HIGHEST_CONF"
 
-# ── 8. 注释主配置文件中所有 Port 行 ──────────
-info "检查主配置文件中的 Port 配置..."
-if grep -qE "^Port " /etc/ssh/sshd_config; then
-  sed -i 's/^Port /#Port /' /etc/ssh/sshd_config
-  success "已注释主配置文件中的 Port 行"
+  # 注释主配置里的 Port 行（避免冲突）
+  if grep -qE "^Port " /etc/ssh/sshd_config; then
+    sed -i 's/^Port /#Port /' /etc/ssh/sshd_config
+    success "已注释主配置文件中的 Port 行"
+  fi
+
 else
-  info "主配置文件中无 Port 行，跳过"
+  # ── 无 drop-in 目录：直接修改主配置文件 ──
+  info "无 drop-in 目录，直接修改主配置文件..."
+
+  # 注释旧 Port 行
+  if grep -qE "^Port " /etc/ssh/sshd_config; then
+    sed -i 's/^Port /#Port /' /etc/ssh/sshd_config
+    success "已注释旧 Port 行"
+  fi
+
+  # 写入各项配置（已有则替换，没有则追加）
+  for item in \
+    "Port $TARGET_PORT" \
+    "PermitRootLogin prohibit-password" \
+    "PasswordAuthentication no" \
+    "PubkeyAuthentication yes"; do
+    KEY=$(echo "$item" | awk '{print $1}')
+    if grep -qiE "^#?${KEY}\s" /etc/ssh/sshd_config; then
+      sed -i "s|^#\?${KEY}.*|${item}|I" /etc/ssh/sshd_config
+    else
+      echo "$item" >> /etc/ssh/sshd_config
+    fi
+  done
+  success "配置已写入主配置文件"
 fi
 
-# ── 9. root 密钥配置 ─────────────────────────
+# ── 7. root 密钥配置 ─────────────────────────
 if [ "$ROOT_CHOICE" = "yes" ] && [ -n "$NORMAL_USER" ]; then
   info "配置 root 密钥登录..."
   NORMAL_HOME=$(eval echo "~$NORMAL_USER")
@@ -273,7 +283,7 @@ elif [ "$ROOT_CHOICE" = "no" ]; then
   info "跳过 root 密钥配置"
 fi
 
-# ── 10. 语法检查 ─────────────────────────────
+# ── 8. 语法检查 ──────────────────────────────
 echo ""
 info "检查 SSH 配置语法..."
 if sshd -t; then
@@ -282,7 +292,7 @@ else
   error "配置有误！请检查后手动修复，备份文件在 *.bak"
 fi
 
-# ── 11. 防火墙同时放行新旧端口 ───────────────
+# ── 9. 防火墙放行 ────────────────────────────
 echo ""
 info "防火墙放行新端口 $TARGET_PORT 和旧端口 $OLD_PORT（保险）..."
 if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
@@ -302,13 +312,13 @@ else
   warn "未检测到防火墙工具，请手动放行端口 $TARGET_PORT"
 fi
 
-# ── 12. 重启 sshd ────────────────────────────
+# ── 10. 重启 sshd ────────────────────────────
 echo ""
 info "重启 sshd 服务..."
 systemctl restart sshd
 success "sshd 已重启，新端口 $TARGET_PORT 已生效"
 
-# ── 13. 输出最终生效配置 ─────────────────────
+# ── 11. 输出最终生效配置 ─────────────────────
 echo ""
 info "最终生效配置："
 sshd -T | grep -E "^port|passwordauth|pubkeyauth|permitroot"
