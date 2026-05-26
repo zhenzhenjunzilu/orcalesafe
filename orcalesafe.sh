@@ -309,9 +309,16 @@ fi
 
 # ── 10. 重启 sshd ────────────────────────────
 echo ""
-info "重启 sshd 服务..."
-systemctl restart sshd
-success "sshd 已重启，新端口 $TARGET_PORT 已生效"
+info "重启 SSH 服务..."
+if systemctl list-units --full -all 2>/dev/null | grep -q "sshd.service"; then
+  SSH_SERVICE="sshd"
+elif systemctl list-units --full -all 2>/dev/null | grep -q "ssh.service"; then
+  SSH_SERVICE="ssh"
+else
+  error "找不到 SSH 服务，请手动重启：systemctl restart ssh 或 systemctl restart sshd"
+fi
+systemctl restart "$SSH_SERVICE"
+success "$SSH_SERVICE 已重启，新端口 $TARGET_PORT 已生效"
 
 # ── 11. 输出最终生效配置 ─────────────────────
 echo ""
